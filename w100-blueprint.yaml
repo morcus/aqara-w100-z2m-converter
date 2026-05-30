@@ -197,13 +197,14 @@ actions:
               {{ is_state(thermostat_mode_switch, 'on') }}
           - condition: template
             value_template: >-
-              {# Prevent overwriting Main if it was just changed (race condition protection) #}
-              {{ (as_timestamp(now()) - as_timestamp(states[main_thermostat].last_changed)) > 10 }}
+              {# Only sync W100→Main if the W100 change was NOT triggered by HA (i.e. physical/user change, not our own command) #}
+              {{ trigger.to_state.context.parent_id is none }}
         sequence:
           - if:
               - condition: template
                 value_template: |
                   {{
+                    (trigger.from_state.state != trigger.to_state.state) and
                     (states(main_thermostat) != states(aqara_w100)) and
                     (
                       (is_state(aqara_w100, 'heat') and (hvac_has_heat | default(false) | bool)) or
@@ -226,9 +227,12 @@ actions:
                   - condition: template
                     value_template: |
                       {{
-                        (is_state(aqara_w100, 'heat') and not (hvac_has_heat | default(false) | bool)) or
-                        (is_state(aqara_w100, 'cool') and not (hvac_has_cool | default(false) | bool)) or
-                        (is_state(aqara_w100, 'auto') and not (hvac_has_auto | default(false) | bool))
+                        (trigger.from_state.state != trigger.to_state.state) and
+                        (
+                          (is_state(aqara_w100, 'heat') and not (hvac_has_heat | default(false) | bool)) or
+                          (is_state(aqara_w100, 'cool') and not (hvac_has_cool | default(false) | bool)) or
+                          (is_state(aqara_w100, 'auto') and not (hvac_has_auto | default(false) | bool))
+                        )
                       }}
                 then:
                   - action: climate.set_hvac_mode
@@ -242,8 +246,10 @@ actions:
           - if:
               - condition: template
                 value_template: >-
-                  {{ state_attr(main_thermostat, "temperature") !=
-                  state_attr(aqara_w100, "temperature") }}
+                  {{
+                    (trigger.from_state.attributes.get('temperature') != trigger.to_state.attributes.get('temperature')) and
+                    (state_attr(main_thermostat, "temperature") != state_attr(aqara_w100, "temperature"))
+                  }}
             then:
               - action: climate.set_temperature
                 data:
@@ -256,11 +262,8 @@ actions:
           - if:
               - condition: template
                 value_template: >-
-                  {# Define the variables#}
                   {% set source = state_attr(main_thermostat, "fan_mode") %}
                   {% set target = state_attr(aqara_w100, "fan_mode") %}
-                  {# Map Main modes to W100 modes to check equivalence #}
-                  {# This prevents overwriting specific main values (like 3) with the W100 generic equivalent (high/2) #}
                   {% if source == 'quiet' %}
                     {% set source_mapped = 'low' %}
                   {% elif source == '1' %}
@@ -270,9 +273,10 @@ actions:
                   {% else %}
                     {% set source_mapped = 'auto' %}
                   {% endif %}
-                  {{ 
-                    (source_mapped != target) and 
-                    (hvac_has_vent | default(false) | bool) 
+                  {{
+                    (trigger.from_state.attributes.get('fan_mode') != trigger.to_state.attributes.get('fan_mode')) and
+                    (source_mapped != target) and
+                    (hvac_has_vent | default(false) | bool)
                   }}
             then:
               - action: climate.set_fan_mode
