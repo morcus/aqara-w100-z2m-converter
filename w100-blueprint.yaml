@@ -155,11 +155,18 @@ actions:
                   {# Define the variables#}
                   {% set source = state_attr(main_thermostat, "fan_mode") %}
                   {% set target = state_attr(aqara_w100, "fan_mode") %}
-                  {# Normalize the source to lowercase and map med->medium for comparison #}
-                  {% set source_norm = 'medium' if source | lower == 'med' else source | lower %}
-                  {# Compare normalized values #}
+                  {# Map Main modes to W100 modes #}
+                  {% if source == 'quiet' %}
+                    {% set source_mapped = 'low' %}
+                  {% elif source == '1' %}
+                    {% set source_mapped = 'medium' %}
+                  {% elif source in ['2', '3', '4', '5'] %}
+                    {% set source_mapped = 'high' %}
+                  {% else %}
+                    {% set source_mapped = 'auto' %}
+                  {% endif %}
                   {{ 
-                    (source_norm != target) and 
+                    (source_mapped != target) and 
                     (hvac_has_vent | default(false) | bool) 
                   }}
             then:
@@ -169,12 +176,14 @@ actions:
                 data:
                   fan_mode: |
                     {% set source = state_attr(main_thermostat, "fan_mode") %}
-                    {# If source is med/medium, pass "medium" to the Aqara #}
-                    {% if source | lower == 'med' or source | lower == 'medium' %}
+                    {% if source == 'quiet' %}
+                      low
+                    {% elif source == '1' %}
                       medium
-                    {# Otherwise just pass the source through #}
+                    {% elif source in ['2', '3', '4', '5'] %}
+                      high
                     {% else %}
-                      {{ source }}
+                      auto
                     {% endif %}
               - delay:
                   seconds: "{{ sync_delay }}"
@@ -186,6 +195,10 @@ actions:
           - condition: template
             value_template: >-
               {{ is_state(thermostat_mode_switch, 'on') }}
+          - condition: template
+            value_template: >-
+              {# Prevent overwriting Main if it was just changed (race condition protection) #}
+              {{ (as_timestamp(now()) - as_timestamp(states[main_thermostat].last_changed)) > 10 }}
         sequence:
           - if:
               - condition: template
@@ -246,11 +259,19 @@ actions:
                   {# Define the variables#}
                   {% set source = state_attr(main_thermostat, "fan_mode") %}
                   {% set target = state_attr(aqara_w100, "fan_mode") %}
-                  {# Normalize source to lowercase and map med->medium for comparison #}
-                  {% set source_norm = 'medium' if source | lower == 'med' else source | lower %}
-                  {# Compare normalized values #}
+                  {# Map Main modes to W100 modes to check equivalence #}
+                  {# This prevents overwriting specific main values (like 3) with the W100 generic equivalent (high/2) #}
+                  {% if source == 'quiet' %}
+                    {% set source_mapped = 'low' %}
+                  {% elif source == '1' %}
+                    {% set source_mapped = 'medium' %}
+                  {% elif source in ['2', '3', '4', '5'] %}
+                    {% set source_mapped = 'high' %}
+                  {% else %}
+                    {% set source_mapped = 'auto' %}
+                  {% endif %}
                   {{ 
-                    (source_norm != target) and 
+                    (source_mapped != target) and 
                     (hvac_has_vent | default(false) | bool) 
                   }}
             then:
@@ -260,15 +281,14 @@ actions:
                 data:
                   fan_mode: |
                     {% set source = state_attr(aqara_w100, "fan_mode") %}
-                    {% set target_valid_list = state_attr(main_thermostat, "fan_modes") %}
-                    
-                    {# If source is med/medium, find the target's specific medium mode #}
-                    {% if source | lower == 'med' or source | lower == 'medium' %}
-                      {{ target_valid_list | select('search', '(?i)^med') | first | default(source) }}
-                      
-                    {# Otherwise just pass the source through #}
+                    {% if source == 'low' %}
+                      quiet
+                    {% elif source == 'medium' %}
+                      1
+                    {% elif source == 'high' %}
+                      2
                     {% else %}
-                      {{ source }}
+                      auto
                     {% endif %}
               - delay:
                   seconds: "{{ sync_delay }}"
