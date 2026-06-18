@@ -90,6 +90,11 @@ variables:
   external_humidity_sensor: !input external_humidity_sensor
   thermostat_mode_switch: >-
     {{ 'switch.' ~ aqara_w100.split('.')[1] ~ '_thermostat_mode' }}
+  # Main-thermostat HVAC modes that the W100 cannot represent and must be left
+  # untouched (no mode sync to the W100, no error/loop). The mode is allowed on
+  # the main thermostat (e.g. Daikin 'fan_only') but simply ignored by the W100.
+  w100_ignored_main_modes:
+    - fan_only
 
 triggers:
   - trigger: state
@@ -122,7 +127,11 @@ actions:
           - if:
               - condition: template
                 value_template: >-
-                  {{ states(main_thermostat) != states(aqara_w100) }}
+                  {# Map Daikin 'dry' to W100 'auto' before comparing, so dry/auto are treated as in-sync.
+                     Skip entirely for modes the W100 can't represent (e.g. 'fan_only'): leave the W100 as-is. #}
+                  {% set m = states(main_thermostat) %}
+                  {% set m_mapped = 'auto' if m == 'dry' else m %}
+                  {{ (m not in w100_ignored_main_modes) and (m_mapped != states(aqara_w100)) }}
               - condition: template
                 value_template: >-
                   {{ is_state(thermostat_mode_switch, 'on') }}
@@ -132,7 +141,8 @@ actions:
                   entity_id: !input aqara_w100
                 data:
                   hvac_mode: |
-                    {{ states(main_thermostat) }}
+                    {% set m = states(main_thermostat) %}
+                    {{ 'auto' if m == 'dry' else m }}
               - delay:
                   seconds: "{{ sync_delay }}"
           - if:
@@ -203,13 +213,16 @@ actions:
           - if:
               - condition: template
                 value_template: |
+                  {# Map W100 'auto' to Daikin 'dry' before comparing; 'auto' is always allowed since it maps to dry #}
+                  {% set w = states(aqara_w100) %}
+                  {% set w_mapped = 'dry' if w == 'auto' else w %}
                   {{
                     (trigger.from_state.state != trigger.to_state.state) and
-                    (states(main_thermostat) != states(aqara_w100)) and
+                    (states(main_thermostat) != w_mapped) and
                     (
                       (is_state(aqara_w100, 'heat') and (hvac_has_heat | default(false) | bool)) or
                       (is_state(aqara_w100, 'cool') and (hvac_has_cool | default(false) | bool)) or
-                      (is_state(aqara_w100, 'auto') and (hvac_has_auto | default(false) | bool)) or
+                      (is_state(aqara_w100, 'auto')) or
                       (is_state(aqara_w100, 'off'))
                     )
                   }}
@@ -217,7 +230,8 @@ actions:
               - action: climate.set_hvac_mode
                 data:
                   hvac_mode: |
-                    {{ states(aqara_w100) }}
+                    {% set w = states(aqara_w100) %}
+                    {{ 'dry' if w == 'auto' else w }}
                 target:
                   entity_id: !input main_thermostat
               - delay:
@@ -226,12 +240,12 @@ actions:
               - if:
                   - condition: template
                     value_template: |
+                      {# 'auto' is intentionally excluded: it now maps to Daikin 'dry' (a supported mode) and must not be bounced back to heat #}
                       {{
                         (trigger.from_state.state != trigger.to_state.state) and
                         (
                           (is_state(aqara_w100, 'heat') and not (hvac_has_heat | default(false) | bool)) or
-                          (is_state(aqara_w100, 'cool') and not (hvac_has_cool | default(false) | bool)) or
-                          (is_state(aqara_w100, 'auto') and not (hvac_has_auto | default(false) | bool))
+                          (is_state(aqara_w100, 'cool') and not (hvac_has_cool | default(false) | bool))
                         )
                       }}
                 then:
