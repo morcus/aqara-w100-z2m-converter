@@ -1,224 +1,110 @@
-# Aqara W100 External Converter for Zigbee2MQTT + Home Assistant Blueprint
+# Aqara W100 ↔ Climate Entity Sync — Home Assistant Blueprint
 
-**There's no need of this converter with Z2M >= 2.7.0.**
+A Home Assistant blueprint that provides **bidirectional synchronization** between an
+Aqara W100 (used as a virtual thermostat) and any real `climate` entity (heat pump,
+boiler, AC, etc.).
 
-**Those changes have been merged in zigbee-herdsman-converters by ['PR #10787'](https://github.com/Koenkk/zigbee-herdsman-converters/pull/10787)**
-
-
-
-**This project provides:**
-
-- A dedicated Zigbee2MQTT external converter for the Aqara W100 Climate Sensor.
-- A Home Assistant blueprint for seamless, bidirectional sync between the W100's virtual thermostat and any climate entity.
-
-It turns the W100 into a reliable, flexible front-end for your heating/cooling system while preserving its native behavior and making it play nicely with your existing Home Assistant setup.
-
-**Important:** The external converter allows decimal in temperature setpoint. However the W100 firmware only reports integer values. 
-Until Aqara fix this (will they ?), there's no way to set decimal set points from the w100 panel. 
+> **Note:** This is a trimmed-down fork. The original project also shipped a
+> Zigbee2MQTT external converter (`w100.js`). That converter is **no longer needed**:
+> its changes were merged upstream into `zigbee-herdsman-converters`
+> ([PR #10787](https://github.com/Koenkk/zigbee-herdsman-converters/pull/10787)) and
+> ship natively in **Zigbee2MQTT ≥ 2.7.0**. This repository now contains **only the
+> blueprint**.
 
 ---
 
-## Key Features
+## What it does
 
-### 1. Robust initialization after pairing
+Once linked, the W100 and your real thermostat stay in sync in both directions:
 
-The included converter ensures a clean, deterministic state as soon as the W100 is paired:
+- **HVAC mode** — `off` / `heat` / `cool` / `auto` (with smart mapping, see below)
+- **Target temperature** — kept identical on both sides
+- **Fan speed** (`fan_mode`) — optional, mapped between the W100 (`auto`/`low`/`medium`/`high`)
+  and your thermostat's own fan steps
+- **External temperature & humidity** — optionally published to the W100 display from
+  any HA sensor
 
-- Correct initialization of:
-  - `Thermostat_Mode` (starts as `OFF` to match device behavior)
-  - `system_mode`
-  - `occupied_heating_setpoint`
-  - `fan_mode`
-  - internal defaults and metadata
-- Prevents `null`/inconsistent values in Zigbee2MQTT.
-- Keeps the device out of unintended thermostat mode on first join (and explicitly enforces `OFF` once during configuration).
-
-All of this is implemented directly in [`w100.js`](w100.js).
+Changes made on the W100 panel propagate to the real thermostat, and changes made in
+Home Assistant are reflected back on the W100.
 
 ---
 
-### 2. Virtual climate entity exposure
+## Mode mapping (important)
 
-The converter exposes a full-featured virtual climate entity in Zigbee2MQTT for the W100:
+The W100 firmware only supports **four** HVAC modes: `off`, `heat`, `cool`, `auto`.
+Many real thermostats (e.g. Daikin) expose extra modes such as `dry`
+(dehumidification) and `fan_only`. This blueprint handles them so they don't conflict:
 
-- `system_mode`: `off`, `heat`, `cool`, `auto`
-- `fan_mode`: `auto`, `low`, `medium`, `high`
-- `occupied_heating_setpoint`: configurable range (see below), 1°C step
-- `local_temperature`: kept in sync, based on the W100's internal temperature reports
-- `Thermostat_Mode`:
-  - `ON`: W100 behaves as a thermostat front-end (encrypted button payloads, middle line enabled).
-  - `OFF`: W100 behaves as a remote/sensor (actions exposed, thermostat behavior disabled).
+| Real thermostat mode | W100 behavior |
+| --- | --- |
+| `off` / `heat` / `cool` | Passed through 1:1 |
+| `dry` (dehumidification) | **Mapped to the W100 `auto` slot**, bidirectionally. Pressing **Auto** on the W100 puts the real thermostat into `dry`. |
+| `auto` (native) | Not used by this mapping — the `auto` slot is repurposed for `dry`. |
+| `fan_only` | **Ignored by the W100**: you can still enable it in Home Assistant, the W100 simply keeps its current mode (no error, no sync loop). It cannot be triggered *from* the W100. |
 
-This creates a stable "virtual thermostat" entity that can be mapped to any actual heating/cooling device in Home Assistant.
+### Why `dry ↔ auto`?
 
----
-
-### 3. System and fan mode control
-
-The converter handles and normalizes all key HVAC parameters:
-
-- System mode:
-  - `off`: power off state (with last active mode preserved)
-  - `heat`
-  - `cool`
-  - `auto`
-- Fan mode:
-  - `auto`
-  - `low`
-  - `medium`
-  - `high`
-
-Changes are converted into the Aqara-specific PMTSD protocol frames and sent to the W100 with:
-
-- Debounced / rate-limited sending
-- Stateful handling of last active mode when toggling `off`/`on`
-- Consistent state updates exposed back to Zigbee2MQTT
+Since the W100 has no `dry` mode and only four slots, the `auto` slot is reused to
+drive dehumidification. The trade-off is that the W100 can no longer command the real
+thermostat's *native* `auto` mode. If you need a different trade-off, see
+[Customizing the mapping](#customizing-the-mapping).
 
 ---
 
-### 4. Temperature setpoint handling and per-device range
+## Requirements
 
-- Exposes `occupied_heating_setpoint` as the target temperature.
-- Supports a **per-device configurable target range** via Zigbee2MQTT device settings:
-  - Navigate to your W100 device → **Settings** → **Device specific**
-  - Configure:
-    - **Min Target Temp**: Minimum allowed temperature (default: 5°C, range: -20°C to 60°C, step: 0.5°C)
-    - **Max Target Temp**: Maximum allowed temperature (default: 30°C, range: -20°C to 60°C, step: 0.5°C)
-  - These values **persist across restarts** and are specific to each W100 device
-- **Default range** (if not configured): 5°C to 30°C
-- **Enforcement**:
-  - The climate entity's temperature range in MQTT discovery uses your configured values
-  - Setting temperature outside the configured range is rejected with a clear error message
-  - Validation occurs in [`PMTSD_to_W100.convertSet()`](w100.js:311) using `meta.options`
-- **Dynamic behavior**:
-  - The [`exposes` function](w100.js:904) reads configured values from device-specific options
-  - The climate entity's [`withSetpoint()`](w100.js:920) uses these configured values for min/max
-  - Changes to min/max settings require a Z2M restart to update the MQTT discovery configuration
-- Temperature values are rounded to integer °C for the device, while allowing half-degree configuration precision
-- Always kept in sync with the underlying PMTSD state to avoid desync between UI and device
-
----
-
-### 5. Battery voltage and percentage
-
-The W100 does not use standard `batteryVoltage` reporting. The converter:
-
-- Parses Aqara's proprietary TLV data (manuSpecificLumi, attribute `0x247`).
-- Extracts:
-  - `battery_voltage` (V)
-  - `battery` (%), derived from voltage.
-- Also configures standard `genPowerCfg.batteryPercentageRemaining` reporting when available.
-
-
----
-
-### 6. Additional exposes and options
-
-The converter also exposes:
-
-- Internal temperature: `temperature` / `local_temperature`.
-- `PMTSD_from_W100_Data`: last raw PMTSD frame decoded (for debugging/advanced usage).
-- OTA support via `lumiZigbeeOTA`.
-- External sensor mapping (temperature/humidity).
-- Multiple configuration options via `modernExtend`:
-  - Auto hide middle line when in thermostat mode.
-  - High/low temperature and humidity alerts.
-  - Sampling and reporting modes and periods.
-  - Identify and other quality-of-life settings.
-
-See [`w100.js`](w100.js) for the full list of exposed entities and options.
-
----
-
-## Home Assistant Blueprint
-
-A dedicated blueprint is included to link the W100 virtual thermostat to any climate entity.
-
-Goal:
-
-- Bidirectional synchronization between:
-  - The W100 virtual thermostat entity (from this converter)
-  - Any existing Home Assistant `climate` entity (heat pump, boiler thermostat, relay, etc.)
-
-Behavior:
-
-- Changes made on the W100 (mode, setpoint, fan) are propagated to the target climate entity.
-- Changes made in Home Assistant (in the linked climate entity) are reflected back to the W100.
-- Keeps UI/behavior consistent, so users can control their real HVAC system directly from the W100 with instant feedback.
-
-Blueprint file:
-
-- [`w100-blueprint.yaml`](w100-blueprint.yaml)
+- **Zigbee2MQTT ≥ 2.7.0** (native Aqara W100 / `Aqara TH-S04D` support — no external
+  converter required).
+- The W100 paired and exposed in Home Assistant with its `climate`, `number`
+  (external temperature/humidity) and `switch` (`thermostat_mode`) entities.
+- A real `climate` entity to sync with.
 
 ---
 
 ## Installation
 
-### 1. Zigbee2MQTT external converter
-
-1. Copy [`w100.js`](w100.js) into your Zigbee2MQTT external converters directory, e.g.:
-
-   - `/config/zigbee2mqtt/w100.js`
-   - or `/opt/zigbee2mqtt/data/w100.js`
-   (path may vary depending on your setup)
-
-2. In your Zigbee2MQTT `configuration.yaml`, add:
-
-   ```yaml
-   external_converters:
-     - w100.js
-   ```
-
-3. Restart Zigbee2MQTT.
-
-4. Pair the Aqara W100:
-   - Put Zigbee2MQTT in pairing mode.
-   - Reset/pair the W100 as usual.
-   - After join, the device should appear as `Aqara TH-S04D` / "Climate Sensor W100" with the new exposes.
+1. In Home Assistant, go to **Settings → Automations & Scenes → Blueprints → Import
+   Blueprint**.
+2. Import [`w100-blueprint.yaml`](w100-blueprint.yaml) (upload it, or paste the raw URL
+   of this file from your repo).
+3. Create a new automation from the blueprint and fill in the inputs (below).
+4. Save and enable.
 
 ---
 
-### 2. Home Assistant blueprint
+## Blueprint inputs
 
-1. In Home Assistant, import the blueprint using `w100-blueprint.yaml`:
-
-   - Go to "Settings" → "Automations & Scenes" → "Blueprints" → "Import Blueprint".
-   - Upload the file or host it in a repo/raw URL and paste the link.
-
-2. Create a new automation from this blueprint:
-   - Select the W100 climate entity (exposed by Zigbee2MQTT with this converter).
-   - Select the target `climate` entity you want to control (heat pump, thermostat, etc.).
-
-3. Save and enable.
-
-From now on, the W100 and the target climate entity remain synchronized in both directions.
+| Input | Description |
+| --- | --- |
+| **Main Thermostat** | Your real `climate` entity to sync with. |
+| **Aqara W100 Climate Controller** | The W100 `climate` entity. |
+| **Heating / Cooling / Auto / Fan Mode Support** | Toggle which modes your real system supports. *(Note: "Fan Mode Support" controls **fan-speed** sync, not a `fan_only` HVAC mode.)* |
+| **Synchronization Delay** | Delay between sync commands, in seconds (default 2). Avoids command flooding. |
+| **Enable External Data Publishing** | Push external temperature/humidity to the W100 display. |
+| **External Temperature / Humidity Sensor** | The HA sensors to publish (optional). |
 
 ---
 
-## Why this project?
+## Customizing the mapping
 
-The stock behavior of the Aqara W100 with generic integrations is limited:
+The mode mapping is hardcoded in [`w100-blueprint.yaml`](w100-blueprint.yaml):
 
-- Incomplete or unstable thermostat representation.
-- Non-standard battery reporting.
-- Lack of robust bidirectional sync with real HVAC devices.
-
-This project focuses on:
-
-- Correct protocol handling for the W100.
-- Clean integration with Zigbee2MQTT.
-- First-class Home Assistant UX through a proper climate entity and ready-to-use blueprint.
-- Safety and predictability by:
-  - Enforcing deterministic defaults.
-  - Avoiding unwanted thermostat activation.
-  - Respecting user-selected modes and last active configuration.
-
-If you are using the Aqara W100 as a wall-mounted thermostat display/controller in a Home Assistant environment, this converter + blueprint combo is designed for you.
+- **`dry ↔ auto`** mapping lives in the HVAC-mode sync conditions/actions of both sync
+  directions (search for `'dry'` / `'auto'`).
+- **Ignored main-only modes** are listed in the `w100_ignored_main_modes` variable
+  near the top of the file (currently `fan_only`). Add other modes there to have the
+  W100 ignore them too.
 
 ---
+
+## Credits
+
+Based on the original
+[Aqara W100 external converter + blueprint project](https://github.com/KipK/aqara-w100-z2m-converter)
+by KipK. This fork keeps only the blueprint and adapts the HVAC-mode handling
+(`dry`/`fan_only`) for thermostats that expose more modes than the W100 supports.
 
 ## Disclaimer
 
-- This is a community-driven integration, not an official Aqara product.
-- Use at your own risk.
-- Review the code in [`w100.js`](w100.js) and the blueprint before deploying in critical environments.
+- Community-driven, not an official Aqara product.
+- Use at your own risk; review the blueprint before deploying in critical environments.
